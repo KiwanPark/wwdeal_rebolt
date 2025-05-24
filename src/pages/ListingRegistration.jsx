@@ -20,7 +20,8 @@ const initialInspections = INSPECTION_ITEMS.reduce((acc, item) => {
   acc[item.id] = {
     images: [],
     status: '',
-    comment: ''
+    comment: '',
+    files: []
   };
   return acc;
 }, {});
@@ -180,7 +181,8 @@ const ListingRegistration = () => {
           ...prev.inspections,
           [itemId]: {
             ...prev.inspections[itemId],
-            images: [...(prev.inspections[itemId].images || []), ...newImageUrls]
+            images: [...(prev.inspections[itemId].images || []), ...newImageUrls],
+            files:  [...prev.inspections[itemId].files,  ...files]
           }
         }
       }));
@@ -219,78 +221,88 @@ const ListingRegistration = () => {
   };
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    try {
-      setIsLoading(true);
-      // 이미지 업로드 처리
-      const imageUrls = await Promise.all(
-        formData.images.map(async (image) => {
-          const storageRef = ref(storage, `listings/${Date.now()}-${image.name}`);
-          const snapshot = await uploadBytes(storageRef, image);
+  e.preventDefault();
+  try {
+    setIsLoading(true);
+
+    // 1) 차량 이미지 업로드 (File → URL)
+    const imageUrls = await Promise.all(
+      formData.images.map(async (image) => {
+        const storageRef = ref(storage, `listings/${Date.now()}-${image.name}`);
+        const snapshot   = await uploadBytes(storageRef, image);
+        return await getDownloadURL(snapshot.ref);
+      })
+    );
+
+    // 2) 배터리 이미지 업로드 (전기차인 경우)
+    let batteryImageUrls = [];
+    if (formData.fuel === '전기' && formData.battery.images.length > 0) {
+      batteryImageUrls = await Promise.all(
+        formData.battery.images.map(async (image) => {
+          const storageRef = ref(storage, `batteries/${Date.now()}-${image.name}`);
+          const snapshot   = await uploadBytes(storageRef, image);
           return await getDownloadURL(snapshot.ref);
         })
       );
+    }
 
-      // 배터리 이미지 업로드 처리 (전기차인 경우)
-      let batteryImageUrls = [];
-      if (formData.fuel === '전기' && formData.battery.images.length > 0) {
-        batteryImageUrls = await Promise.all(
-          formData.battery.images.map(async (image) => {
-            const storageRef = ref(storage, `batteries/${Date.now()}-${image.name}`);
-            const snapshot = await uploadBytes(storageRef, image);
-            return await getDownloadURL(snapshot.ref);
+    // 3) 점검 이미지 업로드 처리
+    const inspectionImagesResults = await Promise.all(
+      Object.entries(formData.inspections).map(async ([part, data]) => {
+        if (data.files.length === 0) return [part, []];
+
+        const urls = await Promise.all(
+          data.files.map(async (image) => {
+            const storageRef = ref(
+              storage,
+              `inspections/${part}/${Date.now()}-${image.name}`
+            );
+            const snap = await uploadBytes(storageRef, image);
+            return await getDownloadURL(snap.ref);
           })
         );
-      }
+        return [part, urls];
+      })
+    );
+    const inspectionImages = Object.fromEntries(inspectionImagesResults);
 
-      // 점검 이미지 업로드 처리
-      const inspectionImagesPromises = Object.entries(formData.inspections).map(async ([part, data]) => {
-        if (data.images.length > 0) {
-          const urls = await Promise.all(
-            data.images.map(async (image) => {
-              const storageRef = ref(storage, `inspections/${part}/${Date.now()}-${image.name}`);
-              const snapshot = await uploadBytes(storageRef, image);
-              return await getDownloadURL(snapshot.ref);
-            })
-          );
-          return [part, urls];
-        }
-        return [part, []];
-      });
+    // 4) files 필드 제거하고 URL만 담은 cleanInspections 생성
+    const cleanInspections = Object.entries(formData.inspections).reduce(
+      (acc, [part, data]) => {
+        const { files, images, ...rest } = data;
+        acc[part] = {
+          ...rest,                            // status, comment 등
+          images: inspectionImages[part] || []
+        };
+        return acc;
+      },
+      {}
+    );
 
-      const inspectionImagesResults = await Promise.all(inspectionImagesPromises);
-      const inspectionImages = Object.fromEntries(inspectionImagesResults);
+    // 5) Firestore로 보낼 최종 데이터 구성
+    const listingData = {
+      ...formData,
+      images: imageUrls,
+      battery: {
+        ...formData.battery,
+        images: batteryImageUrls
+      },
+      inspections: cleanInspections,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
 
-      // Firestore에 데이터 저장
-      const listingData = {
-        ...formData,
-        images: imageUrls,
-        battery: {
-          ...formData.battery,
-          images: batteryImageUrls
-        },
-        inspections: Object.entries(formData.inspections).reduce((acc, [part, data]) => ({
-          ...acc,
-          [part]: {
-            ...data,
-            images: inspectionImages[part]
-          }
-        }), {}),
-        createdAt: new Date(),
-        updatedAt: new Date()
-      };
+    const docRef = await addDoc(collection(db, 'listings'), listingData);
+    console.log('Document written with ID:', docRef.id);
+    navigate(`/listing/${docRef.id}`);
+  } catch (error) {
+    console.error('Error submitting form:', error);
+    alert('매물 등록 중 오류가 발생했습니다.');
+  } finally {
+    setIsLoading(false);
+  }
+};
 
-      const docRef = await addDoc(collection(db, 'listings'), listingData);
-      console.log('Document written with ID: ', docRef.id);
-      
-      navigate(`/listing/${docRef.id}`);
-    } catch (error) {
-      console.error('Error submitting form:', error);
-      alert('매물 등록 중 오류가 발생했습니다.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   return (
     <div className="min-h-screen bg-gray-50">
